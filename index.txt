@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stubborn Clone</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0c0f14; --ink:#e8edf5; --muted:#9aa6b8; --acc:#7ab8ff; --ok:#3dd68c; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+    header, footer { max-width: 920px; margin: 0 auto; padding: 16px 18px; }
+    h1 { font-size: 1.25rem; margin: 0 0 6px; }
+    p { color: var(--muted); margin: 0 0 10px; line-height: 1.45; }
+    .stage { position: relative; max-width: 920px; margin: 0 auto; background:#000; border-radius: 14px; overflow: hidden; aspect-ratio: 4/3; }
+    video, canvas { position:absolute; inset:0; width:100%; height:100%; }
+    video { object-fit: cover; transform: scaleX(-1); }
+    #overlay { pointer-events: none; }
+    .hud { max-width:920px; margin:12px auto 0; padding:0 18px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    button { background:var(--ink); color:#111; border:0; border-radius:8px; padding:8px 12px; font-weight:700; cursor:pointer; }
+    button.ghost { background:#1b2230; color:var(--ink); }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .stat { color:var(--muted); font-size:.92rem; }
+    .stamp { position:absolute; left:50%; top:18%; transform:translateX(-50%) scale(.8); opacity:0; pointer-events:none; font-weight:800; letter-spacing:.06em; background:var(--ok); color:#062; padding:8px 14px; border-radius:10px; transition: opacity .15s, transform .15s; }
+    .stamp.on { opacity:1; transform:translateX(-50%) scale(1); }
+    .err { color:#ff8b8b; min-height:1.2em; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Stubborn Clone</h1>
+    <p>One snapshot of you, imagined as a cartoon, then it does the opposite. Trick it into matching. Camera never leaves this tab.</p>
+  </header>
+  <div class="stage">
+    <video id="cam" playsinline muted></video>
+    <canvas id="overlay"></canvas>
+    <div class="stamp" id="stamp">IT COPIED YOU</div>
+  </div>
+  <div class="hud">
+    <button id="startBtn">Start</button>
+    <button id="imagineBtn" class="ghost" disabled>Imagine me again</button>
+    <span class="stat">Score <b id="score">0</b> · You <b id="youMove">—</b> · Clone <b id="cloneMove">—</b></span>
+  </div>
+  <footer>
+    <p class="err" id="err"></p>
+    <p>Wave a hand above your shoulder, or nod. Feint, then switch while the clone is still finishing its opposite move.</p>
+  </footer>
+
+  <script type="module">
+    import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    const video = document.getElementById("cam");
+    const canvas = document.getElementById("overlay");
+    const ctx = canvas.getContext("2d");
+    const stamp = document.getElementById("stamp");
+    const err = document.getElementById("err");
+    const startBtn = document.getElementById("startBtn");
+    const imagineBtn = document.getElementById("imagineBtn");
+
+    let pose = null;
+    let running = false;
+    let faceSprite = null;
+    let score = 0;
+    let lastScoreAt = 0;
+    let userMove = "still";
+    let cloneMove = "still";
+    let cloneLockUntil = 0;
+    let cloneCommitted = "still";
+    let noseHist = [];
+
+    function setErr(m) { err.textContent = m || ""; }
+
+    function imagineFromVideo() {
+      const w = 160, h = 160;
+      const snap = document.createElement("canvas");
+      snap.width = w; snap.height = h;
+      const s = snap.getContext("2d");
+      s.translate(w, 0); s.scale(-1, 1);
+      const vw = video.videoWidth, vh = video.videoHeight;
+      const side = Math.min(vw, vh) * 0.55;
+      const sx = (vw - side) / 2, sy = Math.max(0, (vh - side) / 2 - side * 0.08);
+      s.drawImage(video, sx, sy, side, side, 0, 0, w, h);
+      const img = s.getImageData(0, 0, w, h);
+      const d = img.data;
+      for (let i = 0; i < d.length; i += 4) {
+        let r = d[i], g = d[i+1], b = d[i+2];
+        const l = 0.32*r + 0.5*g + 0.18*b;
+        r = Math.min(255, r * 1.15 + (r-l)*0.45);
+        g = Math.min(255, g * 1.05 + (g-l)*0.45);
+        b = Math.min(255, b * 0.95 + (b-l)*0.45);
+        const steps = 5;
+        r = Math.round(r / 255 * steps) * (255 / steps);
+        g = Math.round(g / 255 * steps) * (255 / steps);
+        b = Math.round(b / 255 * steps) * (255 / steps);
+        d[i] = r; d[i+1] = g; d[i+2] = b;
+      }
+      s.putImageData(img, 0, 0);
+      s.strokeStyle = "rgba(20,24,32,.85)";
+      s.lineWidth = 3;
+      s.strokeRect(2, 2, w-4, h-4);
+      const out = document.createElement("canvas");
+      out.width = w; out.height = h;
+      out.getContext("2d").drawImage(snap, 0, 0);
+      return out;
+    }
+
+    function detectMove(lm) {
+      const nose = lm[0], ls = lm[11], rs = lm[12], lw = lm[15], rw = lm[16];
+      if (!nose || !ls || !rs) return "still";
+      const shoulderY = (ls.y + rs.y) / 2;
+      const wave =
+        (lw && lw.visibility > 0.4 && lw.y < shoulderY - 0.08) ||
+        (rw && rw.visibility > 0.4 && rw.y < shoulderY - 0.08);
+      noseHist.push(nose.y);
+      if (noseHist.length > 10) noseHist.shift();
+      let nod = false;
+      if (noseHist.length >= 8) {
+        const first = noseHist.slice(0, 4).reduce((a,b)=>a+b,0)/4;
+        const last = noseHist.slice(-4).reduce((a,b)=>a+b,0)/4;
+        nod = Math.abs(last - first) > 0.018;
+      }
+      if (wave) return "wave";
+      if (nod) return "nod";
+      return "still";
+    }
+
+    function opposite(m) {
+      if (m === "wave") return "nod";
+      if (m === "nod") return "wave";
+      return "still";
+    }
+
+    function drawClone(now) {
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      const x = w * 0.5, y = h * 0.78;
+      const waving = cloneMove === "wave";
+      const nodding = cloneMove === "nod";
+      const t = now / 180;
+      const arm = waving ? Math.sin(t) * 0.9 : 0.15;
+      const headBob = nodding ? Math.sin(t * 1.6) * 10 : 0;
+
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.fillStyle = "#1e2633";
+      ctx.beginPath(); ctx.ellipse(0, 28, 54, 16, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#2b3546";
+      ctx.fillRect(-18, -20, 36, 46);
+      ctx.strokeStyle = "#c9d4e6"; ctx.lineWidth = 6; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(-18, -8); ctx.lineTo(-48, -8 - arm * 36); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(18, -8); ctx.lineTo(48, -8 + arm * 22); ctx.stroke();
+      const hs = 56;
+      if (faceSprite) {
+        ctx.drawImage(faceSprite, -hs/2, -78 + headBob, hs, hs);
+      } else {
+        ctx.fillStyle = "#8ab4f8";
+        ctx.beginPath(); ctx.arc(0, -50 + headBob, 24, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function tick() {
+      if (!running) return;
+      const now = performance.now();
+      canvas.width = video.clientWidth;
+      canvas.height = video.clientHeight;
+      if (pose && video.readyState >= 2) {
+        const res = pose.detectForVideo(video, now);
+        const lm = res.landmarks && res.landmarks[0];
+        if (lm) userMove = detectMove(lm);
+      }
+      if (now > cloneLockUntil) {
+        const next = opposite(userMove);
+        if (next !== "still" && next !== cloneCommitted) {
+          cloneCommitted = next;
+          cloneMove = next;
+          cloneLockUntil = now + 900;
+        } else if (userMove === "still") {
+          cloneMove = "still";
+          cloneCommitted = "still";
+        }
+      }
+      if (
+        cloneMove !== "still" &&
+        userMove === cloneMove &&
+        now < cloneLockUntil &&
+        now - lastScoreAt > 1200
+      ) {
+        score += 1;
+        lastScoreAt = now;
+        document.getElementById("score").textContent = score;
+        stamp.classList.add("on");
+        setTimeout(() => stamp.classList.remove("on"), 700);
+      }
+      document.getElementById("youMove").textContent = userMove;
+      document.getElementById("cloneMove").textContent = cloneMove;
+      drawClone(now);
+      requestAnimationFrame(tick);
+    }
+
+    async function bootCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+    }
+
+    async function bootPose() {
+      const files = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+      );
+      pose = await PoseLandmarker.createFromOptions(files, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+        },
+        runningMode: "VIDEO",
+        numPoses: 1
+      });
+    }
+
+    function captureFace() {
+      if (video.readyState < 2) return;
+      faceSprite = imagineFromVideo();
+    }
+
+    startBtn.addEventListener("click", async () => {
+      startBtn.disabled = true;
+      setErr("Loading camera and pose model…");
+      try {
+        await bootCamera();
+        await bootPose();
+        captureFace();
+        imagineBtn.disabled = false;
+        running = true;
+        setErr("");
+        tick();
+      } catch (e) {
+        setErr("Camera or pose model failed. Use desktop Chrome over https.");
+        startBtn.disabled = false;
+        console.error(e);
+      }
+    });
+
+    imagineBtn.addEventListener("click", () => {
+      captureFace();
+    });
+  </script>
+</body>
+</html>
