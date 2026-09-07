@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stubborn Clone</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0c0f14; --ink:#e8edf5; --muted:#9aa6b8; --ok:#3dd68c; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+    .hud {
+      max-width: 920px;
+      margin: 12px auto 8px;
+      padding: 0 18px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .stage {
+      position: relative;
+      max-width: 920px;
+      margin: 0 auto;
+      background: #111;
+      border-radius: 14px;
+      overflow: hidden;
+      aspect-ratio: 4/3;
+    }
+    #overlay { display: block; width: 100%; height: 100%; }
+    video {
+      position: absolute;
+      width: 640px;
+      height: 480px;
+      left: -9999px;
+      opacity: 0;
+      pointer-events: none;
+    }
+    button { background: var(--ink); color: #111; border: 0; border-radius: 8px; padding: 8px 12px; font-weight: 700; cursor: pointer; }
+    button.ghost { background: #1b2230; color: var(--ink); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .stat { color: var(--muted); font-size: .92rem; }
+    .stamp {
+      position: absolute; left: 50%; top: 16%; transform: translateX(-50%);
+      opacity: 0; font-weight: 800; background: var(--ok); color: #062;
+      padding: 8px 14px; border-radius: 10px;
+    }
+    .stamp.on { opacity: 1; }
+    .err { max-width: 920px; margin: 8px auto; padding: 0 18px; color: #ff8b8b; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <button id="startBtn">Start</button>
+    <button id="imagineBtn" class="ghost" disabled>Imagine me again</button>
+    <span class="stat">Score <b id="score">0</b> · You <b id="youMove">—</b> · Clone <b id="cloneMove">—</b> · <span id="statusLine">cam off</span></span>
+  </div>
+  <div class="stage">
+    <video id="cam" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+    <div class="stamp" id="stamp">IT COPIED YOU</div>
+  </div>
+  <p class="err" id="err"></p>
+
+  <script type="module">
+    import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    const video = document.getElementById("cam");
+    const canvas = document.getElementById("overlay");
+    const ctx = canvas.getContext("2d");
+    const stamp = document.getElementById("stamp");
+    const errEl = document.getElementById("err");
+    const statusEl = document.getElementById("statusLine");
+    const startBtn = document.getElementById("startBtn");
+    const imagineBtn = document.getElementById("imagineBtn");
+
+    let pose = null;
+    let running = false;
+    let lastLm = null;
+    let score = 0;
+    let lastScoreAt = 0;
+    let userMove = "still";
+    let cloneMove = "still";
+    let cloneLockUntil = 0;
+    let cloneCommitted = "still";
+    let noseHist = [];
+    let waveFrames = 0;
+    let nodFrames = 0;
+
+    async function waitForFrames(el, timeoutMs = 8000) {
+      const t0 = performance.now();
+      el.muted = true;
+      el.playsInline = true;
+      if (el.readyState < 1) {
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(() => reject(new Error("no frames")), timeoutMs);
+          el.onloadedmetadata = () => {
+            clearTimeout(t);
+            resolve();
+          };
+        });
+      }
+      try { await el.play(); } catch (_) {}
+      while (!el.videoWidth) {
+        if (performance.now() - t0 > timeoutMs) throw new Error("no frames");
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+
+    function detectMove(lm) {
+      const nose = lm[0], ls = lm[11], rs = lm[12], lw = lm[15], rw = lm[16];
+      if (!nose || !ls || !rs) return "still";
+      const shoulderY = (ls.y + rs.y) / 2;
+      const vis = (p) => !p || p.visibility === undefined || p.visibility > 0.5;
+      const wristUp =
+        (lw && vis(lw) && lw.y < shoulderY - 0.12) ||
+        (rw && vis(rw) && rw.y < shoulderY - 0.12);
+      waveFrames = wristUp ? waveFrames + 1 : 0;
+      noseHist.push(nose.y);
+      if (noseHist.length > 18) noseHist.shift();
+      const span = noseHist.length >= 12 ? Math.max(...noseHist) - Math.min(...noseHist) : 0;
+      nodFrames = span > 0.045 ? nodFrames + 1 : Math.max(0, nodFrames - 1);
+      if (waveFrames >= 6) return "wave";
+      if (nodFrames >= 8) return "nod";
+      return "still";
+    }
+
+    function opposite(m) {
+      return m === "wave" ? "nod" : m === "nod" ? "wave" : "still";
+    }
+
+    function paintPig(drawCtx, x, y, move, now) {
+      const bob = move === "nod" ? Math.sin(now / 140) * 8 : 0;
+      const wave = move === "wave" ? 0.4 + Math.sin(now / 150) * 0.5 : 0.05;
+      drawCtx.save();
+      drawCtx.translate(x, y + bob);
+      drawCtx.fillStyle = "rgba(0,0,0,.2)";
+      drawCtx.beginPath();
+      drawCtx.ellipse(0, 78, 48, 12, 0, 0, Math.PI * 2);
+      drawCtx.fill();
+      drawCtx.fillStyle = "#f4a7b9";
+      drawCtx.beginPath();
+      drawCtx.ellipse(0, 18, 42, 50, 0, 0, Math.PI * 2);
+      drawCtx.fill();
+      drawCtx.fillStyle = "#ef8aa3";
+      drawCtx.beginPath();
+      drawCtx.ellipse(-28, -28, 14, 18, -0.4, 0, Math.PI * 2);
+      drawCtx.ellipse(28, -28, 14, 18, 0.4, 0, Math.PI * 2);
+      drawCtx.fill();
+      drawCtx.fillStyle = "#f7c1ce";
+      drawCtx.beginPath();
+      drawCtx.ellipse(-28, -26, 7, 9, -0.4, 0, Math.PI * 2);
+      drawCtx.ellipse(28, -26, 7, 9, 0.4, 0, Math.PI * 2);
+      drawCtx.fill();
+      drawCtx.fillStyle = "#f4a7b9";
+      drawCtx.beginPath();
+      drawCtx.arc(0, -8, 36, 0, Math.PI * 2);
+      drawCtx.fill();
+      drawCtx.fillStyle = "#e87b96";
+      drawCtx.beginPath();
+      drawCtx.ellipse(0, 2, 16, 12, 0, 0, Math.PI * 2);
+      drawCtx.fill();
+      drawCtx.fillStyle = "#c45d76";
+      drawCtx.beginPath();
+      drawCtx.arc(-6, 2, 3.2, 0, Math.PI * 2);
+      drawCtx.arc(6, 2, 3.2, 0, Math.PI * 2);
+      drawCtx.fill();
+      drawCtx.fillStyle = "#2b2430";
+      drawCtx.beginPath();
+      drawCtx.arc(-14, -14, 4.5, 0, Math.PI * 2);
+      drawCtx.arc(14, -14, 4.5, 0, Math.PI * 2);
+      drawCtx.fill();
+      drawCtx.fillStyle = "#fff";
+      drawCtx.beginPath();
+      drawCtx.arc(-12.5, -15.5, 1.6, 0, Math.PI * 2);
+      drawCtx.arc(15.5, -15.5, 1.6, 0, Math.PI * 2);
+      drawCtx.fill();
+      drawCtx.strokeStyle = "#c45d76";
+      drawCtx.lineWidth = 3;
+      drawCtx.lineCap = "round";
+      drawCtx.beginPath();
+      drawCtx.arc(-18, 10, 8, 0.2, 1.1);
+      drawCtx.arc(18, 10, 8, 2.0, 2.9);
+      drawCtx.stroke();
+      drawCtx.strokeStyle = "#f4a7b9";
+      drawCtx.lineWidth = 14;
+      drawCtx.lineCap = "round";
+      drawCtx.beginPath();
+      drawCtx.moveTo(-34, 28);
+      drawCtx.lineTo(-58, 20 - wave * 50);
+      drawCtx.moveTo(34, 28);
+      drawCtx.lineTo(56, 36);
+      drawCtx.stroke();
+      drawCtx.fillStyle = "#ef8aa3";
+      drawCtx.beginPath();
+      if (drawCtx.roundRect) {
+        drawCtx.roundRect(-16, 58, 12, 22, 6);
+        drawCtx.roundRect(4, 58, 12, 22, 6);
+      } else {
+        drawCtx.rect(-16, 58, 12, 22);
+        drawCtx.rect(4, 58, 12, 22);
+      }
+      drawCtx.fill();
+      drawCtx.restore();
+    }
+
+    function paint() {
+      const w = canvas.clientWidth || 640;
+      const h = canvas.clientHeight || 480;
+      canvas.width = w;
+      canvas.height = h;
+      ctx.save();
+      ctx.translate(w, 0);
+      ctx.scale(-1, 1);
+      if (video.videoWidth) ctx.drawImage(video, 0, 0, w, h);
+      else {
+        ctx.fillStyle = "#222";
+        ctx.fillRect(0, 0, w, h);
+      }
+      ctx.restore();
+      let x = w * 0.78;
+      let y = h * 0.36;
+      if (lastLm && lastLm[12]) {
+        x = Math.min(w - 80, Math.max(80, (1 - lastLm[12].x) * w + 70));
+        y = Math.min(h * 0.48, Math.max(h * 0.26, lastLm[12].y * h + 20));
+      }
+      paintPig(ctx, x, y, cloneMove, performance.now());
+    }
+
+    function tick() {
+      if (!running) return;
+      const now = performance.now();
+      statusEl.textContent = video.videoWidth ? video.videoWidth + "x" + video.videoHeight : "no frames";
+      if (pose && video.videoWidth) {
+        try {
+          const res = pose.detectForVideo(video, now);
+          const lm = res.landmarks && res.landmarks[0];
+          if (lm) lastLm = lm;
+          userMove = lm ? detectMove(lm) : "still";
+        } catch (_) {}
+      }
+      if (now > cloneLockUntil) {
+        const next = opposite(userMove);
+        if (next !== "still" && next !== cloneCommitted) {
+          cloneCommitted = cloneMove = next;
+          cloneLockUntil = now + 900;
+        } else if (userMove === "still") {
+          cloneMove = cloneCommitted = "still";
+        }
+      }
+      if (
+        cloneMove !== "still" &&
+        userMove === cloneMove &&
+        now < cloneLockUntil &&
+        now - lastScoreAt > 1200
+      ) {
+        score += 1;
+        lastScoreAt = now;
+        document.getElementById("score").textContent = score;
+        stamp.classList.add("on");
+        setTimeout(() => stamp.classList.remove("on"), 700);
+      }
+      document.getElementById("youMove").textContent = userMove;
+      document.getElementById("cloneMove").textContent = cloneMove;
+      paint();
+      requestAnimationFrame(tick);
+    }
+
+    startBtn.addEventListener("click", async () => {
+      startBtn.disabled = true;
+      errEl.textContent = "Starting camera…";
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+          audio: false
+        });
+        video.srcObject = stream;
+        await waitForFrames(video);
+        running = true;
+        imagineBtn.disabled = false;
+        errEl.textContent = "";
+        tick();
+        try {
+          const files = await FilesetResolver.forVisionTasks(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+          );
+          pose = await PoseLandmarker.createFromOptions(files, {
+            baseOptions: {
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+            },
+            runningMode: "VIDEO",
+            numPoses: 1
+          });
+        } catch (modelErr) {
+          console.error(modelErr);
+          errEl.textContent = "Camera is on. Pose model failed: " + (modelErr.message || modelErr);
+        }
+      } catch (e) {
+        console.error(e);
+        errEl.textContent = "Camera blocked or sent no picture. Allow camera for this site, close Zoom/Meet, reload.";
+        startBtn.disabled = false;
+        if (video.srcObject) {
+          video.srcObject.getTracks().forEach((t) => t.stop());
+          video.srcObject = null;
+        }
+      }
+    });
+
+    imagineBtn.addEventListener("click", () => {
+      errEl.textContent = "Pig clone is live";
+    });
+  </script>
+</body>
+</html>
