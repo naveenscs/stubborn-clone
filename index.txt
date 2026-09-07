@@ -1,0 +1,105 @@
+function paintPig(ctx, x, y, move, now) {
+  const bob = move === "nod" ? Math.sin(now / 140) * 8 : 0;
+  const wave = move === "wave" ? 0.4 + Math.sin(now / 150) * 0.5 : 0.05;
+
+  ctx.save();
+  ctx.translate(x, y + bob);
+
+  ctx.fillStyle = "rgba(0,0,0,.2)";
+  ctx.beginPath();
+  ctx.ellipse(0, 78, 48, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#f4a7b9";
+  ctx.beginPath();
+  ctx.ellipse(0, 18, 42, 50, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#ef8aa3";
+  ctx.beginPath();
+  ctx.ellipse(-28, -28, 14, 18, -0.4, 0, Math.PI * 2);
+  ctx.ellipse(28, -28, 14, 18, 0.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#f7c1ce";
+  ctx.beginPath();
+  ctx.ellipse(-28, -26, 7, 9, -0.4, 0, Math.PI * 2);
+  ctx.ellipse(28, -26, 7, 9, 0.4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#f4a7b9";
+  ctx.beginPath();
+  ctx.arc(0, -8, 36, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#e87b96";
+  ctx.beginPath();
+  ctx.ellipse(0, 2, 16, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#c45d76";
+  ctx.beginPath();
+  ctx.arc(-6, 2, 3.2, 0, Math.PI * 2);
+  ctx.arc(6, 2, 3.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#2b2430";
+  ctx.beginPath();
+  ctx.arc(-14, -14, 4.5, 0, Math.PI * 2);
+  ctx.arc(14, -14, 4.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.beginPath();
+  ctx.arc(-12.5, -15.5, 1.6, 0, Math.PI * 2);
+  ctx.arc(15.5, -15.5, 1.6, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "#c45d76";
+  ctx.lineWidth = 3;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.arc(-18, 10, 8, 0.2, 1.1);
+  ctx.arc(18, 10, 8, 2.0, 2.9);
+  ctx.stroke();
+
+  ctx.strokeStyle = "#f4a7b9";
+  ctx.lineWidth = 14;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(-34, 28);
+  ctx.lineTo(-58, 20 - wave * 50);
+  ctx.moveTo(34, 28);
+  ctx.lineTo(56, 36);
+  ctx.stroke();
+
+  ctx.fillStyle = "#ef8aa3";
+  ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(-16, 58, 12, 22, 6) : ctx.rect(-16, 58, 12, 22);
+  ctx.roundRect ? ctx.roundRect(4, 58, 12, 22, 6) : ctx.rect(4, 58, 12, 22);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function paint() {
+  const w = canvas.clientWidth || 640;
+  const h = canvas.clientHeight || 480;
+  canvas.width = w;
+  canvas.height = h;
+
+  ctx.save();
+  ctx.translate(w, 0);
+  ctx.scale(-1, 1);
+  if (video.videoWidth) ctx.drawImage(video, 0, 0, w, h);
+  else {
+    ctx.fillStyle = "#222";
+    ctx.fillRect(0, 0, w, h);
+  }
+  ctx.restore();
+
+  let x = w * 0.78;
+  let y = h * 0.36;
+  if (lastLm && lastLm[12]) {
+    x = Math.min(w - 80, Math.max(80, (1 - lastLm[12].x) * w + 70));
+    y = Math.min(h * 0.48, Math.max(h * 0.26, lastLm[12].y * h + 20));
+  }
+  paintPig(ctx, x, y, cloneMove, performance.now());
+}
